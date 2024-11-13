@@ -2,70 +2,24 @@ import torch
 import torch.nn as nn
 from torchvision.models import resnet18
 from typing import Any, Callable, List, Optional, Type, Union
-from torchvision.models.resnet import Bottleneck, BasicBlock, conv1x1
+from torchvision.models.resnet import Bottleneck, BasicBlock, conv1x1, load_state_dict_from_url, model_urls
 from segmentation_models_pytorch.base import modules as md
 import torch.nn.functional as F
-
-class CrossAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
-        super(CrossAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-
-        assert (
-            self.head_dim * num_heads == embed_dim
-        ), "Embedding dimension must be divisible by the number of heads"
-
-        self.query_projection = nn.Linear(embed_dim, embed_dim)
-        self.key_projection = nn.Linear(embed_dim, embed_dim)
-        self.value_projection = nn.Linear(embed_dim, embed_dim)
-        self.out_projection = nn.Linear(embed_dim, embed_dim)
-
-    def forward(self, x1, x2):
-        bs, c, h, w = x1.shape
-
-        # 将输入展平为 (bs, h * w, c)
-        x1_flat = x1.view(bs, c, -1).permute(0, 2, 1)  # (bs, h*w, c)
-        x2_flat = x2.view(bs, c, -1).permute(0, 2, 1)  # (bs, h*w, c)
-
-        # 计算 Q, K, V
-        query = self.query_projection(x1_flat)  # (bs, h*w, embed_dim)
-        key = self.key_projection(x2_flat)      # (bs, h*w, embed_dim)
-        value = self.value_projection(x2_flat)  # (bs, h*w, embed_dim)
-
-        # 将维度转换为 (bs, h*w, num_heads, head_dim)
-        query = query.view(bs, -1, self.num_heads, self.head_dim).transpose(1, 2)  # (bs, num_heads, h*w, head_dim)
-        key = key.view(bs, -1, self.num_heads, self.head_dim).transpose(1, 2)      # (bs, num_heads, h*w, head_dim)
-        value = value.view(bs, -1, self.num_heads, self.head_dim).transpose(1, 2)  # (bs, num_heads, h*w, head_dim)
-
-        # 计算注意力分数
-        attention_scores = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)  # (bs, num_heads, h*w, h*w)
-        attention_probs = torch.softmax(attention_scores, dim=-1)  # (bs, num_heads, h*w, h*w)
-
-        # 计算注意力输出
-        attention_output = torch.matmul(attention_probs, value)  # (bs, num_heads, h*w, head_dim)
-
-        # 连接头并通过输出投影
-        attention_output = attention_output.transpose(1, 2).contiguous().view(bs, -1, self.embed_dim)  # (bs, h*w, embed_dim)
-        output = self.out_projection(attention_output)  # (bs, h*w, embed_dim)
-
-        # 重新展平为 (bs, c, h, w)
-        return output.permute(0, 2, 1).view(bs, self.embed_dim, h, w)  # (bs, embed_dim, h, w)
-
+import torch.nn.init as init
+from torch.nn import MultiheadAttention
 
 
 class ResNet(nn.Module):
     def __init__(
-        self,
-        block: Type[Union[BasicBlock, Bottleneck]],
-        layers: List[int],
-        num_classes: int = 1000,
-        zero_init_residual: bool = False,
-        groups: int = 1,
-        width_per_group: int = 64,
-        replace_stride_with_dilation: Optional[List[bool]] = None,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
+            self,
+            block: Type[Union[BasicBlock, Bottleneck]],
+            layers: List[int],
+            num_classes: int = 1000,
+            zero_init_residual: bool = False,
+            groups: int = 1,
+            width_per_group: int = 64,
+            replace_stride_with_dilation: Optional[List[bool]] = None,
+            norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
         super().__init__()
         # _log_api_usage_once(self)
@@ -115,12 +69,12 @@ class ResNet(nn.Module):
                     nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
     def _make_layer(
-        self,
-        block: Type[Union[BasicBlock, Bottleneck]],
-        planes: int,
-        blocks: int,
-        stride: int = 1,
-        dilate: bool = False,
+            self,
+            block: Type[Union[BasicBlock, Bottleneck]],
+            planes: int,
+            blocks: int,
+            stride: int = 1,
+            dilate: bool = False,
     ) -> nn.Sequential:
         norm_layer = self._norm_layer
         downsample = None
@@ -180,86 +134,6 @@ class ResNet(nn.Module):
         return self._forward_impl(x)
 
 
-class ConvBNReLU(nn.Module):
-    def __init__(self, in_c, out_c, ks, stride=1, norm=True, res=False):
-        super(ConvBNReLU, self).__init__()
-        if norm:
-            self.conv = nn.Sequential(
-                nn.Conv2d(in_c, out_c, kernel_size=ks, padding=ks // 2, stride=stride, bias=False),
-                nn.BatchNorm2d(out_c), nn.ReLU(True))
-        else:
-            self.conv = nn.Conv2d(in_c, out_c, kernel_size=ks, padding=ks // 2, stride=stride, bias=False)
-        self.res = res
-
-    def forward(self, x):
-        if self.res:
-            return (x + self.conv(x))
-        else:
-            return self.conv(x)
-
-class FUSE1(nn.Module):
-    def __init__(self, in_channels_list=(64, 128, 256, 512)):
-        super(FUSE1, self).__init__()
-        self.c31 = ConvBNReLU(in_channels_list[2], in_channels_list[2], 1)
-        self.c32 = ConvBNReLU(in_channels_list[3], in_channels_list[2], 1)
-        self.c33 = ConvBNReLU(in_channels_list[2], in_channels_list[2], 3)
-
-        self.c21 = ConvBNReLU(in_channels_list[1], in_channels_list[1], 1)
-        self.c22 = ConvBNReLU(in_channels_list[2], in_channels_list[1], 1)
-        self.c23 = ConvBNReLU(in_channels_list[1], in_channels_list[1], 3)
-
-        self.c11 = ConvBNReLU(in_channels_list[0], in_channels_list[0], 1)
-        self.c12 = ConvBNReLU(in_channels_list[1], in_channels_list[0], 1)
-        self.c13 = ConvBNReLU(in_channels_list[0], in_channels_list[0], 3)
-
-    def forward(self, x):
-        x, x1, x2, x3 = x
-        h, w = x2.shape[-2:]
-        x2 = self.c33(F.interpolate(self.c32(x3), size=(h, w)) + self.c31(x2))
-        h, w = x1.shape[-2:]
-        x1 = self.c23(F.interpolate(self.c22(x2), size=(h, w)) + self.c21(x1))
-        h, w = x.shape[-2:]
-        x = self.c13(F.interpolate(self.c12(x1), size=(h, w)) + self.c11(x))
-        return x, x1, x2, x3
-
-
-class FUSE2(nn.Module):
-    def __init__(self, in_channels_list=(64, 128, 256)):
-        super(FUSE2, self).__init__()
-
-        self.c21 = ConvBNReLU(in_channels_list[1], in_channels_list[1], 1)
-        self.c22 = ConvBNReLU(in_channels_list[2], in_channels_list[1], 1)
-        self.c23 = ConvBNReLU(in_channels_list[1], in_channels_list[1], 3)
-
-        self.c11 = ConvBNReLU(in_channels_list[0], in_channels_list[0], 1)
-        self.c12 = ConvBNReLU(in_channels_list[1], in_channels_list[0], 1)
-        self.c13 = ConvBNReLU(in_channels_list[0], in_channels_list[0], 3)
-
-    def forward(self, x):
-        x, x1, x2 = x
-        h, w = x1.shape[-2:]
-        x1 = self.c23(F.interpolate(self.c22(x2), size=(h, w), mode='bilinear', align_corners=True) + self.c21(x1))
-        h, w = x.shape[-2:]
-        x = self.c13(F.interpolate(self.c12(x1), size=(h, w), mode='bilinear', align_corners=True) + self.c11(x))
-        return x, x1, x2
-
-
-class FUSE3(nn.Module):
-    def __init__(self, in_channels_list=(64, 128)):
-        super(FUSE3, self).__init__()
-
-        self.c11 = ConvBNReLU(in_channels_list[0], in_channels_list[0], 1)
-        self.c12 = ConvBNReLU(in_channels_list[1], in_channels_list[0], 1)
-        self.c13 = ConvBNReLU(in_channels_list[0], in_channels_list[0], 3)
-
-    def forward(self, x):
-        x, x1 = x
-        h, w = x.shape[-2:]
-        x = self.c13(F.interpolate(self.c12(x1), size=(h, w), mode='bilinear', align_corners=True) + self.c11(x))
-        return x, x1
-
-
-
 class DecoderBlock(nn.Module):
     def __init__(self, cin, cadd, cout, ):
         super().__init__()
@@ -277,72 +151,187 @@ class DecoderBlock(nn.Module):
         return x1
 
 
-class MID(nn.Module):
-    def __init__(self, encoder_channels, decoder_channels):
-        super().__init__()
-        encoder_channels = encoder_channels[1:][::-1]
-        self.in_channels = [encoder_channels[0]] + list(decoder_channels[:-1])
-        self.add_channels = list(encoder_channels[1:]) + [64]
-        self.out_channels = decoder_channels
-        self.fuse1 = FUSE1()
-        self.fuse2 = FUSE2()
-        self.fuse3 = FUSE3()
-        decoder_convs = {}
-        for layer_idx in range(len(self.in_channels) - 1):
-            for depth_idx in range(layer_idx + 1):
-                if depth_idx == 0:
-                    in_ch = self.in_channels[layer_idx]
-                    skip_ch = self.add_channels[layer_idx] * (layer_idx + 1)
-                    out_ch = self.out_channels[layer_idx]
-                else:
-                    out_ch = self.add_channels[layer_idx]
-                    skip_ch = self.add_channels[layer_idx] * (layer_idx + 1 - depth_idx)
-                    in_ch = self.add_channels[layer_idx - 1]
-                decoder_convs[f"x_{depth_idx}_{layer_idx}"] = DecoderBlock(in_ch, skip_ch, out_ch)
-        decoder_convs[f"x_{0}_{len(self.in_channels) - 1}"] = DecoderBlock(self.in_channels[-1], 0,
-                                                                           self.out_channels[-1])
-        self.decoder_convs = nn.ModuleDict(decoder_convs)
+class Decoder(nn.Module):
+    def __init__(self, input_channels):
+        super(Decoder, self).__init__()
+        self.conv1 = nn.ConvTranspose2d(input_channels, 128, kernel_size=4, stride=2,
+                                        padding=1)  # Output: (bs, 128, height*2, width*2)
+        self.bn1 = nn.BatchNorm2d(128)
+        self.conv2 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2,
+                                        padding=1)  # Output: (bs, 64, height*4, width*4)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.conv3 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2,
+                                        padding=1)  # Output: (bs, 32, height*8, width*8)
+        self.bn3 = nn.BatchNorm2d(32)
+        self.conv4 = nn.ConvTranspose2d(32, 2, kernel_size=4, stride=2,
+                                        padding=1)  # Output: (bs, 2, height*16, width*16)
+        self._initialize_weights()
 
-    def forward(self, *features):
-        decoder_features = {}
-        features = self.fuse1(features)[::-1]
-        decoder_features["x_0_0"] = self.decoder_convs["x_0_0"](features[0], features[1])
-        decoder_features["x_1_1"] = self.decoder_convs["x_1_1"](features[1], features[2])
-        decoder_features["x_2_2"] = self.decoder_convs["x_2_2"](features[2], features[3])
-        decoder_features["x_2_2"], decoder_features["x_1_1"], decoder_features["x_0_0"] = self.fuse2(
-            (decoder_features["x_2_2"], decoder_features["x_1_1"], decoder_features["x_0_0"]))
-        decoder_features["x_0_1"] = self.decoder_convs["x_0_1"](decoder_features["x_0_0"],
-                                                                torch.cat((decoder_features["x_1_1"], features[2]), 1))
-        decoder_features["x_1_2"] = self.decoder_convs["x_1_2"](decoder_features["x_1_1"],
-                                                                torch.cat((decoder_features["x_2_2"], features[3]), 1))
-        decoder_features["x_1_2"], decoder_features["x_0_1"] = self.fuse3(
-            (decoder_features["x_1_2"], decoder_features["x_0_1"]))
-        decoder_features["x_0_2"] = self.decoder_convs["x_0_2"](decoder_features["x_0_1"], torch.cat(
-            (decoder_features["x_1_2"], decoder_features["x_2_2"], features[3]), 1))
-        return self.decoder_convs["x_0_3"](
-            torch.cat((decoder_features["x_0_2"], decoder_features["x_1_2"], decoder_features["x_2_2"]), 1))
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.ConvTranspose2d):
+                # 使用 He 初始化
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = nn.ReLU(inplace=True)(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = nn.ReLU(inplace=True)(x)
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = nn.ReLU(inplace=True)(x)
+        x = self.conv4(x)
+        return x
+
+
+class UpBlock(nn.Module):
+    """Upsample block for DRRG and TextSnake."""
+
+    def __init__(self, in_channels, out_channels):
+        super(UpBlock, self).__init__()
+
+        assert isinstance(in_channels, int)
+        assert isinstance(out_channels, int)
+
+        self.conv1x1 = nn.Conv2d(
+            in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.deconv = nn.ConvTranspose2d(
+            out_channels, out_channels, kernel_size=4, stride=2, padding=1)
+
+    def forward(self, x):
+        x = F.relu(self.conv1x1(x))
+        x = F.relu(self.conv3x3(x))
+        x = self.deconv(x)
+        return x
+
+
+class FPN_UNet(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 ):
+        super(FPN_UNet, self).__init__()
+        assert len(in_channels) == 4
+        assert isinstance(out_channels, int)
+
+        blocks_out_channels = [out_channels] + [
+            min(out_channels * 2**i, 256) for i in range(4)
+        ]
+        blocks_in_channels = [blocks_out_channels[1]] + [
+            in_channels[i] + blocks_out_channels[i + 2] for i in range(3)
+        ] + [in_channels[3]]
+
+        self.up4 = nn.ConvTranspose2d(
+            blocks_in_channels[4],
+            blocks_out_channels[4],
+            kernel_size=4,
+            stride=2,
+            padding=1)
+        self.up_block3 = UpBlock(blocks_in_channels[3], blocks_out_channels[3])
+        self.up_block2 = UpBlock(blocks_in_channels[2], blocks_out_channels[2])
+        self.up_block1 = UpBlock(blocks_in_channels[1], blocks_out_channels[1])
+        self.up_block0 = UpBlock(blocks_in_channels[0], blocks_out_channels[0])
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.ConvTranspose2d):
+                # 使用 He 初始化
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            if isinstance(m, nn.Conv2d):
+                # 使用 He 初始化
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        c2, c3, c4, c5 = x
+
+        x = F.relu(self.up4(c5))
+
+        x = torch.cat([x, c4], dim=1)
+        x = F.relu(self.up_block3(x))
+
+        x = torch.cat([x, c3], dim=1)
+        x = F.relu(self.up_block2(x))
+
+        x = torch.cat([x, c2], dim=1)
+        x = F.relu(self.up_block1(x))
+
+        x = self.up_block0(x)
+        # the output should be of the same height and width as backbone input
+        return x
+
 
 class Matcher(nn.Module):
     def __init__(self):
         super(Matcher, self).__init__()
-        self.backbone1 = ResNet(BasicBlock, [2, 2, 2, 2])  # ToDo: 加预训练权重
+        self.backbone1 = ResNet(BasicBlock, [2, 2, 2, 2])
+        state_dict = load_state_dict_from_url(model_urls['resnet18'],
+                                              progress=True)
+        self.backbone1.load_state_dict(state_dict)
+
+
+        self.backbone_mask = ResNet(BasicBlock, [2, 2, 2, 2])
+        state_dict = load_state_dict_from_url(model_urls['resnet18'],
+                                              progress=True)
+        self.backbone_mask.load_state_dict(state_dict)
+
+
         self.backbone2 = ResNet(BasicBlock, [2, 2, 2, 2])
-        self.attn = CrossAttention(embed_dim=512, num_heads=4)
-        # self.decoder = MID(encoder_channels=(64, 128, 256, 512), decoder_channels=(256, 128, 64, 32))
-        self.seg_head = nn.Sequential(
-            nn.UpsamplingBilinear2d(scale_factor=32.),
-            nn.Conv2d(512, 64, kernel_size=3, padding=3 // 2, stride=1, bias=False),
-            nn.BatchNorm2d(64), nn.ReLU(True),
-            nn.Conv2d(64, 2, kernel_size=1)
+        state_dict = load_state_dict_from_url(model_urls['resnet18'],
+                                              progress=True)
+        self.backbone2.load_state_dict(state_dict)
+        self.seg_head = Decoder(input_channels=256)
+        # self.seg_head = nn.Sequential(
+        #     nn.UpsamplingBilinear2d(scale_factor=16),
+        #     nn.Conv2d(256, 64, kernel_size=3, padding=3 // 2, stride=1, bias=False),
+        #     nn.BatchNorm2d(64), nn.ReLU(True),
+        #     nn.Conv2d(64, 2, kernel_size=1)
+        # )
+        self.strides = [4, 8, 16, 32]
+        self.fpn1 = FPN_UNet(
+            in_channels=[64, 128, 256, 512],
+            out_channels=256
         )
+        self.fpn2 = FPN_UNet(
+            in_channels=[64, 128, 256, 512],
+            out_channels=256
+        )
+        self.attn = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
 
     def forward(self, x1, x2, mask):
-        feat_1 = self.backbone1(x1 * mask)
-        # feat_1 = self.decoder(*feat_1)
+        feat_1 = self.backbone1(x1)
+        feat_mask = self.backbone_mask(mask)
+        feat_1 = [f1 + fm for (f1, fm) in zip(feat_1, feat_mask)]  # follow alpha clip
+        # feat_1 = [f1 * F.max_pool2d(mask.sum(dim=1).unsqueeze(1), stride, stride)
+        #           for (f1, stride) in zip(feat_1, self.strides)]
         feat_2 = self.backbone2(x2)
-        # feat_2 = self.decoder(*feat_2)
-        attn_score = self.attn(feat_1[-1], feat_2[-1])
-        pred = self.seg_head(attn_score)
+
+        # ToDo: 占用显存 可能使用方法不太对 先不用了 但是理论上上限高
+        feat_1 = F.avg_pool2d(self.fpn1(feat_1), 16, 16)  # need to init fpn
+        feat_2 = F.avg_pool2d(self.fpn2(feat_2), 16, 16)
+
+        # feat_1 = feat_1[-2]
+        # feat_2 = feat_2[-2]
+        # attn_score = self.attn(feat_1, feat_2)
+        # 将输入展平为 (H*W, B, C)
+        B, C, H, W = feat_1.shape
+        tensor1_flat = feat_1.view(B, C, -1).permute(2, 0, 1)  # 变成 (H*W, B, C)
+        tensor2_flat = feat_2.view(B, C, -1).permute(2, 0, 1)  # 变成 (H*W, B, C)
+        attention_output, attention_scores = self.attn(tensor1_flat, tensor2_flat, tensor2_flat)
+        attention_output = attention_output.permute(1, 2, 0).reshape(B, C, H, W)
+        # attention_map = attention_scores.mean(dim=1).view(B, H, W)
+        # attn_score = self.interactive_attention(feat_1, feat_2)
+        pred = self.seg_head(attention_output)
         return pred
-
-

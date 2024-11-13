@@ -39,26 +39,29 @@ class MatchDataset(Dataset):
         with open(root, 'r')as f:
             self.data = json.load(f)
             f.close()
-
+        self.data = self.data
         self.training = training
         if training:
+            # ToDo: Augmentation
             self.img_transform = torchvision.transforms.Compose(
                 [
                     torchvision.transforms.Resize([640, 640]),
                     # torchvision.transforms.RandomCrop(640),
-                    torchvision.transforms.RandomHorizontalFlip(p=0.5),
-                    torchvision.transforms.RandomVerticalFlip(p=0.5),
+                    # torchvision.transforms.RandomHorizontalFlip(p=0.5),
+                    # torchvision.transforms.RandomVerticalFlip(p=0.5),
                     torchvision.transforms.ToTensor(),
                     torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
                                                      std=(0.229, 0.224, 0.225))
+                    # torchvision.transforms.Normalize(mean=(123.675, 116.28, 103.53,),
+                    #                                  std=(58.395, 57.12, 57.375))
                 ]
             )
             self.label_transform = torchvision.transforms.Compose(
                 [
                     torchvision.transforms.Resize([640, 640]),
                     # torchvision.transforms.RandomCrop(640),
-                    torchvision.transforms.RandomHorizontalFlip(p=0.5),
-                    torchvision.transforms.RandomVerticalFlip(p=0.5),
+                    # torchvision.transforms.RandomHorizontalFlip(p=0.5),
+                    # torchvision.transforms.RandomVerticalFlip(p=0.5),
                     torchvision.transforms.ToTensor(),
                     # torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
                     #                                  std=(0.229, 0.224, 0.225))
@@ -109,11 +112,11 @@ class MatchDataset(Dataset):
             img1 = Image.open(img_1_path).convert('RGB')
             img2 = Image.open(img_2_path).convert('RGB')
 
-            h1, w1 = img1.size
-            h2, w2 = img2.size
+            w1, h1 = img1.size
+            w2, h2 = img2.size
 
-            img1_mask = generate_mask(img_1_inst['bbox'], h1, w1)
-            img2_mask = generate_mask(img_2_inst['bbox'], h2, w2)
+            img1_mask = generate_mask(img_1_inst['bbox'], w1, h1)
+            img2_mask = generate_mask(img_2_inst['bbox'], w2, h2)
 
             img1_tensor = self.img_transform(img1)
             img2_tensor = self.img_transform(img2)
