@@ -40,7 +40,7 @@ class ResNet(nn.Module):
             )
         self.groups = groups
         self.base_width = width_per_group
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+        self.conv1 = nn.Conv2d(6, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -272,26 +272,45 @@ class FPN_UNet(nn.Module):
         # the output should be of the same height and width as backbone input
         return x
 
+class AddCoords(nn.Module):
+    def __init__(self, with_r=True):
+        super().__init__()
+        self.with_r = with_r
+
+    def forward(self, input_tensor):
+        batch_size, _, x_dim, y_dim = input_tensor.size()
+        xx_c, yy_c = torch.meshgrid(torch.arange(x_dim, dtype=input_tensor.dtype),
+                                    torch.arange(y_dim, dtype=input_tensor.dtype))
+        xx_c = xx_c.to(input_tensor.device) / (x_dim - 1) * 2 - 1
+        yy_c = yy_c.to(input_tensor.device) / (y_dim - 1) * 2 - 1
+        xx_c = xx_c.expand(batch_size, 1, x_dim, y_dim)
+        yy_c = yy_c.expand(batch_size, 1, x_dim, y_dim)
+        ret = torch.cat((input_tensor, xx_c, yy_c), dim=1)
+        if self.with_r:
+            rr = torch.sqrt(torch.pow(xx_c - 0.5, 2) + torch.pow(yy_c - 0.5, 2))
+            ret = torch.cat([ret, rr], dim=1)
+        return ret
+
 
 class Matcher(nn.Module):
     def __init__(self):
         super(Matcher, self).__init__()
         self.backbone1 = ResNet(BasicBlock, [2, 2, 2, 2])
-        state_dict = load_state_dict_from_url(model_urls['resnet18'],
-                                              progress=True)
-        self.backbone1.load_state_dict(state_dict)
+        # state_dict = load_state_dict_from_url(model_urls['resnet18'],
+        #                                       progress=True)
+        # self.backbone1.load_state_dict(state_dict, strict=False)
 
 
         self.backbone_mask = ResNet(BasicBlock, [2, 2, 2, 2])
-        state_dict = load_state_dict_from_url(model_urls['resnet18'],
-                                              progress=True)
-        self.backbone_mask.load_state_dict(state_dict)
+        # state_dict = load_state_dict_from_url(model_urls['resnet18'],
+        #                                       progress=True)
+        # self.backbone_mask.load_state_dict(state_dict, strict=False)
 
 
         self.backbone2 = ResNet(BasicBlock, [2, 2, 2, 2])
-        state_dict = load_state_dict_from_url(model_urls['resnet18'],
-                                              progress=True)
-        self.backbone2.load_state_dict(state_dict)
+        # state_dict = load_state_dict_from_url(model_urls['resnet18'],
+        #                                       progress=True)
+        # self.backbone2.load_state_dict(state_dict)
         self.seg_head = Decoder(input_channels=256)
         # self.seg_head = nn.Sequential(
         #     nn.UpsamplingBilinear2d(scale_factor=16),
@@ -309,21 +328,22 @@ class Matcher(nn.Module):
             out_channels=256
         )
         self.attn = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
+        self.addcoords = AddCoords()
 
     def forward(self, x1, x2, mask):
-        feat_1 = self.backbone1(x1)
-        feat_mask = self.backbone_mask(mask)
+        feat_1 = self.backbone1(self.addcoords(x1))
+        feat_mask = self.backbone_mask(self.addcoords(mask.type_as(x1)))
         feat_1 = [f1 + fm for (f1, fm) in zip(feat_1, feat_mask)]  # follow alpha clip
         # feat_1 = [f1 * F.max_pool2d(mask.sum(dim=1).unsqueeze(1), stride, stride)
         #           for (f1, stride) in zip(feat_1, self.strides)]
-        feat_2 = self.backbone2(x2)
+        feat_2 = self.backbone2(self.addcoords(x2))
 
         # ToDo: 占用显存 可能使用方法不太对 先不用了 但是理论上上限高
-        feat_1 = F.avg_pool2d(self.fpn1(feat_1), 16, 16)  # need to init fpn
-        feat_2 = F.avg_pool2d(self.fpn2(feat_2), 16, 16)
+        # feat_1 = F.avg_pool2d(self.fpn1(feat_1), 16, 16)  # need to init fpn
+        # feat_2 = F.avg_pool2d(self.fpn2(feat_2), 16, 16)
 
-        # feat_1 = feat_1[-2]
-        # feat_2 = feat_2[-2]
+        feat_1 = feat_1[-2]
+        feat_2 = feat_2[-2]
         # attn_score = self.attn(feat_1, feat_2)
         # 将输入展平为 (H*W, B, C)
         B, C, H, W = feat_1.shape
