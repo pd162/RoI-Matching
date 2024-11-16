@@ -11,7 +11,7 @@ from tqdm import tqdm
 from model import Matcher
 from dataset import MatchDataset
 import torch.optim as optim
-from losses import DiceLoss, FocalLoss, SoftCrossEntropyLoss, LovaszLoss
+from losses import DiceLoss, FocalLoss, SoftCrossEntropyLoss, LovaszLoss, OHEMCrossEntropyLoss
 import torch.distributed as dist
 from torch.cuda.amp import autocast, GradScaler
 import torch.multiprocessing as mp
@@ -64,10 +64,10 @@ def reduce_loss(tensor, rank, world_size):
 
 def parse_args():
     args = argparse.ArgumentParser()
-    args.add_argument('--train-root', type=str, default='train_0.json')
+    args.add_argument('--train-root', type=str, default='test_1.json')
     args.add_argument('--val-root', type=str, default='test_1.json')
-    args.add_argument('--bs', type=int, default=12)
-    args.add_argument('--nw', type=int, default=16)
+    args.add_argument('--bs', type=int, default=16)
+    args.add_argument('--nw', type=int, default=8)
     args.add_argument('--save-log-dir', type=str, default='./log/')
     args.add_argument('--epochs', type=int, default=100)
     args.add_argument('--interval', type=int, default=1)
@@ -75,6 +75,7 @@ def parse_args():
     args.add_argument('--save-ckpt-dir', type=str, default='./ckpt/')
     args.add_argument('--resume', type=str, default='')
     args.add_argument('--local_rank', type=int, help="local gpu id", default=-1)
+    args.add_argument('--lr', type=float, default=1e-3)
 
     return args.parse_args()
 
@@ -103,10 +104,13 @@ def train(args):
     device = local_rank
     model = Matcher().cuda()
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2,
-                                                               eta_min=1e-6,
-                                                               last_epoch=-1)  # 并不是最优策略 基本前10个epoch有点浪费
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
+    # scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2,
+    #                                                            eta_min=1e-6,
+    #                                                            last_epoch=-1)  # 并不是最优策略 基本前10个epoch有点浪费
+
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.8)
+
     model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank,
                                                 find_unused_parameters=True)
 
@@ -135,6 +139,7 @@ def train(args):
     DiceLoss_fn = DiceLoss(mode='multiclass')
     Lovas_fn = LovaszLoss(mode='multiclass')
     SoftCrossEntropy_fn = SoftCrossEntropyLoss(smooth_factor=0.1)
+    # SoftCrossEntropy_fn = OHEMCrossEntropyLoss()
     if not os.path.exists(args.save_log_dir):
         os.mkdir(args.save_log_dir)
     if not os.path.exists(args.save_ckpt_dir):
@@ -158,11 +163,11 @@ def train(args):
                 pred = model(ref_img, test_img, ref_mask)
                 # test_mask = test_mask.to(torch.long)
                 test_mask = (test_mask != 0).any(dim=1).long()
-                loss = SoftCrossEntropy_fn(pred, test_mask) + DiceLoss_fn(pred, test_mask)  # ToDo: OHEM BCELoss
-                # loss = DiceLoss_fn(pred, test_mask)
+                # loss = SoftCrossEntropy_fn(pred, test_mask) + Lovas_fn(pred, test_mask)  # ToDo: OHEM BCELoss
+                loss = DiceLoss_fn(pred, test_mask)
 
                 scaler.scale(loss).backward()
-                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 100.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -201,7 +206,7 @@ def train(args):
 
             if iu[1] > best_iou and global_rank == 0:  # train_loss_per_epoch valid_loss_per_epoch
                 state = {'epoch': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}
-                filename = os.path.join(args.save_ckpt_dir, f'checkpoint-best_{epoch}.pth')
+                filename = os.path.join(args.save_ckpt_dir, f'checkpoint-best_{epoch}_{iu[1]}.pth')
                 torch.save(state, filename)
                 best_iou = iu[1]
                 # best_mode = copy.deepcopy(model)
