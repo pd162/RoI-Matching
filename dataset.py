@@ -5,7 +5,8 @@ import torchvision.transforms
 from PIL import Image
 import matplotlib
 from torch.utils.data import Dataset, DataLoader
-
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 def generate_mask(coords, width, height):
     """
@@ -43,52 +44,50 @@ class MatchDataset(Dataset):
         self.training = training
         if training:
             # ToDo: Augmentation
-            self.img_transform = torchvision.transforms.Compose(
-                [
-                    torchvision.transforms.Resize([640, 640]),
-                    # torchvision.transforms.RandomCrop(640),
-                    # torchvision.transforms.RandomHorizontalFlip(p=0.5),
-                    # torchvision.transforms.RandomVerticalFlip(p=0.5),
-                    torchvision.transforms.ToTensor(),
-                    torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
-                                                     std=(0.229, 0.224, 0.225))
-                    # torchvision.transforms.Normalize(mean=(123.675, 116.28, 103.53,),
-                    #                                  std=(58.395, 57.12, 57.375))
-                ]
-            )
-            self.label_transform = torchvision.transforms.Compose(
-                [
-                    torchvision.transforms.Resize([640, 640]),
-                    # torchvision.transforms.RandomCrop(640),
-                    # torchvision.transforms.RandomHorizontalFlip(p=0.5),
-                    # torchvision.transforms.RandomVerticalFlip(p=0.5),
-                    torchvision.transforms.ToTensor(),
-                    # torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
-                    #                                  std=(0.229, 0.224, 0.225))
-                ]
-            )
+            self.transform = A.Compose([
+                # reszie
+                A.Resize(512, 512),
+                # A.HorizontalFlip(p=0.5),
+                # A.OneOf([
+                #     A.VerticalFlip(p=0.5),
+                #     A.RandomRotate90(p=0.5),
+                #     A.RandomBrightnessContrast(p=0.2, brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2)),
+                #     # A.HueSaturationValue(p=0.2, hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2),
+                #     A.ShiftScaleRotate(p=0.2, shift_limit=0.0625, scale_limit=0.2, rotate_limit=20),
+                #     A.CoarseDropout(p=0.2),
+                #     A.Transpose(p=0.5)
+                # ]),
+                A.Normalize(),
+                ToTensorV2(),
+            ])
         else:
-            self.img_transform = torchvision.transforms.Compose(
-                [
-                    torchvision.transforms.Resize([640, 640]),
-                    # torchvision.transforms.RandomHorizontalFlip(p=0.5),
-                    # torchvision.transforms.RandomVerticalFlip(p=0.5),
-                    torchvision.transforms.ToTensor(),
-                    torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
-                                                     std=(0.229, 0.224, 0.225))
-                ]
-            )
-            self.label_transform = torchvision.transforms.Compose(
-                [
-                    torchvision.transforms.Resize([640, 640]),
-                    # torchvision.transforms.RandomCrop(640),
-                    # torchvision.transforms.RandomHorizontalFlip(p=0.5),
-                    # torchvision.transforms.RandomVerticalFlip(p=0.5),
-                    torchvision.transforms.ToTensor(),
-                    # torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
-                    #                                  std=(0.229, 0.224, 0.225))
-                ]
-            )
+            self.transform = A.Compose([
+                A.Resize(512, 512),
+                A.Normalize(),
+                ToTensorV2(),
+            ])
+            # self.img_transform = torchvision.transforms.Compose(
+            #     [
+            #         torchvision.transforms.Resize([640, 640]),
+            #         # torchvision.transforms.RandomHorizontalFlip(p=0.5),
+            #         # torchvision.transforms.RandomVerticalFlip(p=0.5),
+            #         torchvision.transforms.ToTensor(),
+            #         torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
+            #                                          std=(0.229, 0.224, 0.225))
+            #     ]
+            # )
+            # self.label_transform = torchvision.transforms.Compose(
+            #     [
+            #         torchvision.transforms.Resize([640, 640]),
+            #         # torchvision.transforms.RandomCrop(640),
+            #         # torchvision.transforms.RandomHorizontalFlip(p=0.5),
+            #         # torchvision.transforms.RandomVerticalFlip(p=0.5),
+            #         torchvision.transforms.ToTensor(),
+            #         # torchvision.transforms.Normalize(mean=(0.485, 0.455, 0.406),
+            #         #                                  std=(0.229, 0.224, 0.225))
+            #     ]
+            # )
+        # print(self.transform)
 
     def __len__(self):
         return len(self.data)
@@ -118,16 +117,21 @@ class MatchDataset(Dataset):
             img1_mask = generate_mask(img_1_inst['bbox'], w1, h1)
             img2_mask = generate_mask(img_2_inst['bbox'], w2, h2)
 
-            img1_tensor = self.img_transform(img1)
-            img2_tensor = self.img_transform(img2)
-            img1_mask_tensor = self.label_transform(img1_mask)
-            img2_mask_tensor = self.label_transform(img2_mask)
+            # img1_tensor = self.img_transform(img1)
+            # img2_tensor = self.img_transform(img2)
+            # img1_mask_tensor = self.label_transform(img1_mask)
+            # img2_mask_tensor = self.label_transform(img2_mask)
 
+            transformed1 = self.transform(image=np.array(img1), mask=np.array(img1_mask))
+            transformed2 = self.transform(image=np.array(img2), mask=np.array(img2_mask))
+            # transformed2 = self.transform(image=img2, mask=img2_mask)
+            # image = transformed['image']
+            # mask = transformed['mask']
             res_dict = dict(
-                test_img=img1_tensor,
-                ref_img=img2_tensor,
-                test_mask=img1_mask_tensor,
-                ref_mask=img2_mask_tensor
+                test_img=transformed1['image'],
+                ref_img=transformed2['image'],
+                test_mask=transformed1['mask'].permute(2, 0, 1),
+                ref_mask=transformed2['mask'].permute(2, 0, 1)
             )
             return res_dict
         # except:
