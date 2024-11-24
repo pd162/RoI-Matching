@@ -14,7 +14,11 @@ pip install -r requirement.txt
 
 - #### Preparation
 
+[SVRD]
 https://rrc.cvc.uab.es/?ch=21&com=downloads
+
+[CDLA]
+https://github.com/buptlihang/CDLA
 
 - #### Generate Labels
 
@@ -44,5 +48,7 @@ CUDA_VISIBLE_DEVICES=0 python test.py
 
 TBD
 
+
+## Acknowledge
 
 
