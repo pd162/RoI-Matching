@@ -215,156 +215,85 @@ class DetectionIoUEvaluator(object):
         return methodMetrics
 
 # @METRICS.register_module()  # register the Accuracy class to the METRICS registry
-# class SimpleAccuracy(BaseMetric):
-#     """ Accuracy Evaluator
-#
-#     Default prefix: ACC
-#
-#     Metrics:
-#         - accuracy (float): classification accuracy
-#     """
-#
-#     default_prefix = 'ACC'  # set default_prefix
-#
-#     def __init__(self,
-#              ann_file: Optional[str] = None,
-#              metric: Union[str, List[str]] = 'bbox',
-#              classwise: bool = False,
-#              proposal_nums: Sequence[int] = (100, 300, 1000),
-#              iou_thrs: Optional[Union[float, Sequence[float]]] = None,
-#              metric_items: Optional[Sequence[str]] = None,
-#              format_only: bool = False,
-#              outfile_prefix: Optional[str] = None,
-#              file_client_args: dict = None,
-#              backend_args: dict = None,
-#              collect_device: str = 'cpu',
-#              prefix: Optional[str] = None,
-#              sort_categories: bool = False) -> None:
-#              super().__init__(collect_device=collect_device, prefix=prefix)
-#              self.deteval = DetectionIoUEvaluator()
-#             # coco evaluation metrics
-#             # self.metrics = metric if isinstance(metric, list) else [metric]
-#             # allowed_metrics = ['bbox', 'segm', 'proposal', 'proposal_fast']
-#             # for metric in self.metrics:
-#             #     if metric not in allowed_metrics:
-#             #         raise KeyError(
-#             #             "metric should be one of 'bbox', 'segm', 'proposal', "
-#             #             f"'proposal_fast', but got {metric}.")
-#
-#             # # do class wise evaluation, default False
-#             # self.classwise = classwise
-#
-#             # # proposal_nums used to compute recall or precision.
-#             # self.proposal_nums = list(proposal_nums)
-#
-#             # # iou_thrs used to compute recall or precision.
-#             # if iou_thrs is None:
-#             #     iou_thrs = np.linspace(
-#             #         .5, 0.95, int(np.round((0.95 - .5) / .05)) + 1, endpoint=True)
-#             # self.iou_thrs = iou_thrs
-#             # self.metric_items = metric_items
-#             # self.format_only = format_only
-#             # if self.format_only:
-#             #     assert outfile_prefix is not None, 'outfile_prefix must be not'
-#             #     'None when format_only is True, otherwise the result files will'
-#             #     'be saved to a temp directory which will be cleaned up at the end.'
-#
-#             # self.outfile_prefix = outfile_prefix
-#
-#             # self.backend_args = backend_args
-#             # if file_client_args is not None:
-#             #     raise RuntimeError(
-#             #         'The `file_client_args` is deprecated, '
-#             #         'please use `backend_args` instead, please refer to'
-#             #         'https://github.com/open-mmlab/mmdetection/blob/main/configs/_base_/datasets/coco_detection.py'  # noqa: E501
-#             #     )
-#
-#             # # if ann_file is not specified,
-#             # # initialize coco api with the converted dataset
-#             # if ann_file is not None:
-#             #     with get_local_path(
-#             #             ann_file, backend_args=self.backend_args) as local_path:
-#             #         self._coco_api = COCO(local_path)
-#             #         if sort_categories:
-#             #             # 'categories' list in objects365_train.json and
-#             #             # objects365_val.json is inconsistent, need sort
-#             #             # list(or dict) before get cat_ids.
-#             #             cats = self._coco_api.cats
-#             #             sorted_cats = {i: cats[i] for i in sorted(cats)}
-#             #             self._coco_api.cats = sorted_cats
-#             #             categories = self._coco_api.dataset['categories']
-#             #             sorted_categories = sorted(
-#             #                 categories, key=lambda i: i['id'])
-#             #             self._coco_api.dataset['categories'] = sorted_categories
-#             # else:
-#             #     self._coco_api = None
-#
-#             # # handle dataset lazy init
-#             # self.cat_ids = None
-#             # self.img_ids = None
-#
-#     def np2ic15(self, img):
-#         rgb_image = np.stack((img,) * 1, axis=-1) * 255
-#         a, b = cv2.connectedComponents(rgb_image.astype(np.uint8))
-#         pred_boxes = []
-#         for i in range(1, a):
-#             m = (b == i)
-#             xnz, ynz = m.nonzero()
-#             xmin = xnz.min()
-#             xmax = (xnz.max() + 1)
-#             ymin = ynz.min()
-#             ymax = (ynz.max() + 1)
-#             pred_boxes.append((ymin, xmin, ymax, xmax))
-#         results = []
-#         for (y1, x1, y2, x2) in pred_boxes:
-#             results.append(
-#                 {
-#                   'points': [(y1, x1), (y1, x2), (y2, x2), (y2, x1)],
-#                   'ignore':  False,
-#                 }
-#             )
-#         return results
-#
-#     def process(self, data_batch: Sequence[dict], data_samples: Sequence[dict]):
-#         """Process one batch of data and predictions. The processed
-#         Results should be stored in `self.results`, which will be used
-#         to compute the metrics when all batches have been processed.
-#
-#         Args:
-#             data_batch (Sequence[Tuple[Any, dict]]): A batch of data
-#                 from the dataloader.
-#             data_samples (Sequence[dict]): A batch of outputs from
-#                 the model.
-#         """
-#
-#         # fetch classification prediction results and category labels
-#         # print(data_batch)
-#         num_classes = len(self.dataset_meta['classes'])
-#         for data_sample in data_samples:
-#             pred_label = data_sample['pred_sem_seg']['data'].squeeze()
-#             # format_only always for test dataset without ground truth
-#             # if not self.format_only:
-#             label = data_sample['gt_sem_seg']['data'].squeeze().to(
-#                 pred_label)
-#             pred_boxes = self.np2ic15(pred_label.cpu().numpy())
-#             label_boxes = self.np2ic15(label.cpu().numpy())
-#             metric = self.deteval.evaluate_image(label_boxes, pred_boxes)
-#             self.results.append(metric)
-#         # for ds in data_samples:
-#         #     gt_box = self.np2ic15(ds['gt_instances']['bboxes'].cpu().numpy())
-#         #     pred_box = self.np2ic15(ds['pred_instances']['bboxes'].cpu().numpy())
-#         #     metric = self.deteval.evaluate_image(gt_box, pred_box)
-#         #     self.results.append(metric)
-#
-#     def compute_metrics(self, results: List):
-#         """Compute the metrics from processed results.
-#
-#         Args:
-#             results (dict): The processed results of each batch.
-#
-#         Returns:
-#             Dict: The computed metrics. The keys are the names of the metrics,
-#             and the values are corresponding results.
-#         """
-#         metrics = self.deteval.combine_results(results)
-#         return metrics
+class SimpleAccuracy:
+    """ Accuracy Evaluator
+
+    Default prefix: ACC
+
+    Metrics:
+        - accuracy (float): classification accuracy
+    """
+
+    default_prefix = 'ACC'  # set default_prefix
+
+    def __init__(self,) -> None:
+             self.deteval = DetectionIoUEvaluator()
+
+
+    def np2ic15(self, img):
+        rgb_image = np.stack((img,) * 1, axis=-1) * 255
+        a, b = cv2.connectedComponents(rgb_image.astype(np.uint8))
+        pred_boxes = []
+        for i in range(1, a):
+            m = (b == i)
+            xnz, ynz = m.nonzero()
+            xmin = xnz.min()
+            xmax = (xnz.max() + 1)
+            ymin = ynz.min()
+            ymax = (ynz.max() + 1)
+            pred_boxes.append((ymin, xmin, ymax, xmax))
+        results = []
+        for (y1, x1, y2, x2) in pred_boxes:
+            results.append(
+                {
+                  'points': [(y1, x1), (y1, x2), (y2, x2), (y2, x1)],
+                  'ignore':  False,
+                }
+            )
+        return results
+
+    def process(self, preds, gts):
+        """Process one batch of data and predictions. The processed
+        Results should be stored in `self.results`, which will be used
+        to compute the metrics when all batches have been processed.
+
+        Args:
+            data_batch (Sequence[Tuple[Any, dict]]): A batch of data
+                from the dataloader.
+            data_samples (Sequence[dict]): A batch of outputs from
+                the model.
+        """
+
+        # fetch classification prediction results and category labels
+        # print(data_batch)
+        # num_classes = len(self.dataset_meta['classes'])
+        results = []
+        # for data_sample in data_samples:
+        #     pred_label = data_sample['pred_sem_seg']['data'].squeeze()
+        #     # format_only always for test dataset without ground truth
+        #     # if not self.format_only:
+        #     label = data_sample['gt_sem_seg']['data'].squeeze().to(
+        #         pred_label)
+        #     pred_boxes = self.np2ic15(pred_label.cpu().numpy())
+        #     label_boxes = self.np2ic15(label.cpu().numpy())
+        #     metric = self.deteval.evaluate_image(label_boxes, pred_boxes)
+        #     results.append(metric)
+        for pred, gt in zip(preds, gts):
+            gt_box = self.np2ic15(gt)
+            pred_box = self.np2ic15(pred)
+            metric = self.deteval.evaluate_image(gt_box, pred_box)
+            results.append(metric)
+        return results
+
+    def compute_metrics(self, results: List):
+        """Compute the metrics from processed results.
+
+        Args:
+            results (dict): The processed results of each batch.
+
+        Returns:
+            Dict: The computed metrics. The keys are the names of the metrics,
+            and the values are corresponding results.
+        """
+        metrics = self.deteval.combine_results(results)
+        return metrics
