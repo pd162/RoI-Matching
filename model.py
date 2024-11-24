@@ -292,6 +292,75 @@ class AddCoords(nn.Module):
         return ret
 
 
+class Matcher_wdq(nn.Module):
+    def __init__(self):
+        super(Matcher_wdq, self).__init__()
+        self.backbone1 = ResNet(BasicBlock, [2, 2, 2, 2])
+        # state_dict = load_state_dict_from_url(model_urls['resnet18'],
+        #                                       progress=True)
+        # self.backbone1.load_state_dict(state_dict, strict=False)
+        self.backbone2 = ResNet(BasicBlock, [2, 2, 2, 2])
+        # state_dict = load_state_dict_from_url(model_urls['resnet18'],
+        #                                       progress=True)
+        # self.backbone2.load_state_dict(state_dict, strict=False)
+        self.fpn1 = FPN_UNet(
+            in_channels=[64, 128, 256, 512],
+            out_channels=256
+        )
+        self.fpn2 = FPN_UNet(
+            in_channels=[64, 128, 256, 512],
+            out_channels=256
+        )
+        self.cross_attn_1 = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
+        self.cross_attn_2 = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
+        self.addcoords_1 = AddCoords()
+        # self.addcoords_2 = AddCoords()
+        self.seg_head = Decoder(input_channels=256)
+        self.strides = [4, 8, 16, 32]
+
+    def forward(self, x1, x2, mask):
+        feat_1 = self.backbone1(self.addcoords_1(x1))
+        feat_2 = self.backbone2(self.addcoords_1(x2))
+        mask = (mask != 0).any(dim=1).to(torch.float)
+        feat_1_mask = [f1 * F.max_pool2d(mask.unsqueeze(1), stride, stride)
+                  for (f1, stride) in zip(feat_1, self.strides)]
+
+        feat_1_fpn = self.fpn1(feat_1)  # 4000M
+        feat_1_mask = self.fpn1(feat_1_mask)
+        feat_2 = self.fpn2(feat_2)  # 4000M
+
+        bs, c, h, w = feat_2.shape
+        new_h, new_w = h // 16, w // 16
+        y, x = torch.meshgrid(torch.arange(new_h), torch.arange(new_w))
+        y = y.float() * 16 + torch.randint(0, 4, (new_h, new_w)).float()  # 随机选择 4x4 网格中的 y 坐标
+        x = x.float() * 16 + torch.randint(0, 4, (new_h, new_w)).float()  # 随机选择 4x4 网格中的 x 坐标
+        y = 2 * y / (h - 1) - 1  # 归一化到 [-1, 1]
+        x = 2 * x / (w - 1) - 1  # 归一化到 [-1, 1]
+
+        # 扩展 x, y 坐标为 (bs, new_h, new_w, 2)
+        grid = torch.stack((x, y), dim=-1)  # (new_h, new_w, 2)
+        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1).cuda()  # (bs, new_h, new_w, 2)
+
+        feat_1_fpn = F.grid_sample(feat_1_fpn, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        feat_1_mask = F.grid_sample(feat_1_mask, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+
+        feat_2 = F.grid_sample(feat_2, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+
+        B, C, H, W = feat_1_fpn.shape
+        tensor1_flat = feat_1_fpn.view(B, C, -1).permute(2, 0, 1)  # 变成 (H*W, B, C)
+        tensor2_flat = feat_1_mask.view(B, C, -1).permute(2, 0, 1)  # 变成 (H*W, B, C)
+
+        tensor1_flat, _ = self.cross_attn_1(tensor2_flat, tensor1_flat, tensor1_flat)
+
+        tensor2_flat = feat_2.view(B, C, -1).permute(2, 0, 1)
+        attention_output, attention_scores = self.cross_attn_2(tensor2_flat, tensor1_flat, tensor1_flat)  # try
+        attention_output = attention_output.permute(1, 2, 0).reshape(B, C, H, W)
+
+        pred = self.seg_head(attention_output)
+        return pred
+
+
+
 class Matcher(nn.Module):
     def __init__(self):
         super(Matcher, self).__init__()
@@ -327,7 +396,8 @@ class Matcher(nn.Module):
             in_channels=[64, 128, 256, 512],
             out_channels=256
         )
-        self.attn = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
+        self.self_attn = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
+        self.cross_attn = MultiheadAttention(embed_dim=256, num_heads=8, batch_first=False)
         self.addcoords = AddCoords()
 
     def forward(self, x1, x2, mask):
@@ -339,17 +409,35 @@ class Matcher(nn.Module):
         feat_2 = self.backbone2(self.addcoords(x2))
 
         # ToDo: 占用显存 可能使用方法不太对 先不用了 但是理论上上限高
+        # ToDo: grid sampling
+        # ToDo: Problem: 没有学到跨区域的信息
         # feat_1 = F.avg_pool2d(self.fpn1(feat_1), 16, 16)  # need to init fpn
         # feat_2 = F.avg_pool2d(self.fpn2(feat_2), 16, 16)
+        feat_1 = self.fpn1(feat_1)  # 4000M
+        feat_2 = self.fpn2(feat_2)  # 4000M
 
-        feat_1 = feat_1[-2]
-        feat_2 = feat_2[-2]
+        bs, c, h, w = feat_1.shape
+        new_h, new_w = h // 16, w // 16
+        y, x = torch.meshgrid(torch.arange(new_h), torch.arange(new_w))
+        y = y.float() * 16 + torch.randint(0, 4, (new_h, new_w)).float()  # 随机选择 4x4 网格中的 y 坐标
+        x = x.float() * 16 + torch.randint(0, 4, (new_h, new_w)).float()  # 随机选择 4x4 网格中的 x 坐标
+        y = 2 * y / (h - 1) - 1  # 归一化到 [-1, 1]
+        x = 2 * x / (w - 1) - 1  # 归一化到 [-1, 1]
+
+        # 扩展 x, y 坐标为 (bs, new_h, new_w, 2)
+        grid = torch.stack((x, y), dim=-1)  # (new_h, new_w, 2)
+        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1).cuda()  # (bs, new_h, new_w, 2)
+
+        feat_1 = F.grid_sample(feat_1, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        feat_2 = F.grid_sample(feat_2, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
         # attn_score = self.attn(feat_1, feat_2)
         # 将输入展平为 (H*W, B, C)
         B, C, H, W = feat_1.shape
         tensor1_flat = feat_1.view(B, C, -1).permute(2, 0, 1)  # 变成 (H*W, B, C)
         tensor2_flat = feat_2.view(B, C, -1).permute(2, 0, 1)  # 变成 (H*W, B, C)
-        attention_output, attention_scores = self.attn(tensor1_flat, tensor2_flat, tensor2_flat)
+
+        tensor2_flat, _ = self.self_attn(tensor2_flat, tensor2_flat, tensor2_flat)
+        attention_output, attention_scores = self.cross_attn(tensor1_flat, tensor2_flat, tensor2_flat)
         attention_output = attention_output.permute(1, 2, 0).reshape(B, C, H, W)
         # attention_map = attention_scores.mean(dim=1).view(B, H, W)
         # attn_score = self.interactive_attention(feat_1, feat_2)

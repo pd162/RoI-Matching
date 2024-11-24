@@ -9,8 +9,8 @@ import copy
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from model import Matcher
-from dataset import MatchDataset
+from model import Matcher, Matcher_wdq
+from dataset import MatchDataset, MatchDataset_DLA, MatchDataset_CDLA
 import torch.optim as optim
 from losses import DiceLoss, FocalLoss, SoftCrossEntropyLoss, LovaszLoss
 from torch.cuda.amp import autocast, GradScaler
@@ -58,14 +58,15 @@ class AverageMeter(object):
 
 def parse_args():
     args = argparse.ArgumentParser()
-    args.add_argument('--train-root', type=str, default='test_1.json')
-    args.add_argument('--val-root', type=str, default='test_1.json')
+    args.add_argument('--train-root', type=str, default='test_cdla.json')
+    args.add_argument('--val-root', type=str, default='test_cdla.json')
     args.add_argument('--bs', type=int, default=12)
     args.add_argument('--nw', type=int, default=16)
     args.add_argument('--save-log-dir', type=str, default='./log/')
-    args.add_argument('--epochs', type=int, default=100)
+    args.add_argument('--epochs', type=int, default=50)
     args.add_argument('--interval', type=int, default=1)
     args.add_argument('--iter-inter', type=int, default=50)
+    args.add_argument('--lr', type=float, default=1e-4)
     args.add_argument('--save-ckpt-dir', type=str, default='./ckpt/')
     args.add_argument('--resume', type=str, default='')
     # args.add_argument('--local_rank', type=int, help="local gpu id", default=-1)
@@ -89,12 +90,13 @@ def get_logger(filename, verbosity=1, name=None):
     return logger
 
 def train(args):
-    model = Matcher().cuda()
-    optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    model = Matcher_wdq().cuda()
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     # optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2,
-                                                               eta_min=1e-6,
-                                                               last_epoch=-1)  # 并不是最优策略 基本前10个epoch有点浪费
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.8)
+    # scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2,
+    #                                                            eta_min=1e-6,
+    #                                                            last_epoch=-1)  # 并不是最优策略 基本前10个epoch有点浪费
     # model = nn.parallel.DataParallel(model)
     # if len(args.resume) > 0:
     #     ckpt = torch.load(args.resume)
@@ -102,11 +104,16 @@ def train(args):
     #     optimizer.load_state_dict(ckpt['optimizer'])
     #
     #
-    train_dataset = MatchDataset(args.train_root, training=True)
-    val_dataset = MatchDataset(args.val_root, training=False)
+    train_dataset = MatchDataset_CDLA(args.train_root, training=True)
+    val_dataset = MatchDataset_CDLA(args.val_root, training=False)
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.bs, num_workers=args.nw)
     val_dataloader = DataLoader(val_dataset, batch_size=args.bs, num_workers=args.nw)
+
+    if len(args.resume) > 0:
+        ckpt = torch.load(args.resume)
+        model.load_state_dict(ckpt['state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer'])
 
     scaler = GradScaler()
     DiceLoss_fn = DiceLoss(mode='multiclass')
@@ -132,18 +139,19 @@ def train(args):
                 'test_mask'], batch_samples['ref_mask']
             test_img, ref_img, test_mask, ref_mask = test_img.cuda(), ref_img.cuda(), test_mask.cuda(), ref_mask.cuda()
 
-            with autocast():
-                pred = model(ref_img, test_img, ref_mask)
+            # with autocast():
+            pred = model(ref_img, test_img, ref_mask)
                 # test_mask = test_mask.to(torch.long)
-                test_mask = (test_mask != 0).any(dim=1).long()
-                loss = SoftCrossEntropy_fn(pred, test_mask) + Lovas_fn(pred, test_mask)  # ToDo: OHEM BCELoss
+            test_mask = (test_mask != 0).any(dim=1).long()
+            loss = SoftCrossEntropy_fn(pred, test_mask) + DiceLoss_fn(pred, test_mask)  # ToDo: OHEM BCELoss
                 # loss = DiceLoss_fn(pred, test_mask)
-
-                scaler.scale(loss).backward()
-                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            loss.backward()
+                # scaler.scale(loss).backward()
+                # grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 100.0)
+                # scaler.step(optimizer)
+                # scaler.update()
+            optimizer.step()
+            optimizer.zero_grad()
 
             image_loss = loss.item()
             train_epoch_loss.update(image_loss)
@@ -178,12 +186,11 @@ def train(args):
 
             if iu[1] > best_iou:  # train_loss_per_epoch valid_loss_per_epoch
                 state = {'epoch': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}
-                filename = os.path.join(args.save_ckpt_dir, f'checkpoint-best_{epoch}.pth')
+                filename = os.path.join(args.save_ckpt_dir, f'checkpoint-best_{epoch}_{iu[1]}.pth')
                 torch.save(state, filename)
                 best_iou = iu[1]
                 # best_mode = copy.deepcopy(model)
                 logger.info('[save] Best Model saved at epoch:{} ============================='.format(epoch))
-
 
 if __name__ == '__main__':
     args = parse_args()

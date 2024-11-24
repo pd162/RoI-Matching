@@ -30,8 +30,39 @@ def generate_mask(coords, width, height):
                        [coords[6], coords[7]]], dtype=np.int32)
 
     # 填充多边形区域
-    cv2.fillPoly(mask, [points], (255, 255, 255))
+    mask = cv2.fillPoly(mask, [points], (255, 255, 255))
     return Image.fromarray(mask)
+
+def generate_mask_multi(coords_list, width, height):
+    """
+    生成一个二值化的mask.
+
+    参数:
+    coords: list, 包含 2n 个坐标值 [x1, y1, x2, y2, x3, y3, x4, y4, ...]
+    width: int, 图像的宽度
+    height: int, 图像的高度
+
+    返回:
+    numpy.ndarray, 二值化mask
+    """
+    # 创建一个全零的mask
+    mask = np.zeros((height, width, 3), dtype=np.uint8)
+    for coords in coords_list:
+        # 将坐标转换为NumPy数组并重塑为适合cv2.fillPoly的形状
+        points = coords.reshape(-1, 2).astype('int32')
+
+        # 填充多边形区域
+        mask = cv2.fillPoly(mask, [points], (255, 255, 255))
+    return Image.fromarray(mask)
+
+
+def box2poly(box):
+    x, y, w, h = box
+    return [x, y, x+w, y, x+w, y+h, x, y+h]
+
+def points2poly(points):
+    return np.array(points).reshape(-1)
+
 
 class MatchDataset(Dataset):
     def __init__(self, root, training=True):
@@ -46,23 +77,23 @@ class MatchDataset(Dataset):
             # ToDo: Augmentation
             self.transform = A.Compose([
                 # reszie
-                A.Resize(512, 512),
+                A.Resize(640, 640),
                 # A.HorizontalFlip(p=0.5),
-                # A.OneOf([
-                #     A.VerticalFlip(p=0.5),
-                #     A.RandomRotate90(p=0.5),
-                #     A.RandomBrightnessContrast(p=0.2, brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2)),
-                #     # A.HueSaturationValue(p=0.2, hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2),
-                #     A.ShiftScaleRotate(p=0.2, shift_limit=0.0625, scale_limit=0.2, rotate_limit=20),
-                #     A.CoarseDropout(p=0.2),
-                #     A.Transpose(p=0.5)
-                # ]),
+                A.OneOf([
+                    A.VerticalFlip(p=0.5),
+                    A.RandomRotate90(p=0.5),
+                    A.RandomBrightnessContrast(p=0.2, brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2)),
+                    # A.HueSaturationValue(p=0.2, hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2),
+                    A.ShiftScaleRotate(p=0.2, shift_limit=0.0625, scale_limit=0.2, rotate_limit=20),
+                    A.CoarseDropout(p=0.2),
+                    A.Transpose(p=0.5)
+                ]),
                 A.Normalize(),
                 ToTensorV2(),
             ])
         else:
             self.transform = A.Compose([
-                A.Resize(512, 512),
+                A.Resize(640, 640),
                 A.Normalize(),
                 ToTensorV2(),
             ])
@@ -138,6 +169,91 @@ class MatchDataset(Dataset):
         #     print('Data Error!')
         #     item = self._rand_another()
         #     return self.__getitem__(item)
+
+class MatchDataset_DLA(MatchDataset):
+    def __getitem__(self, item):
+        inst = self.data[item]
+        img_1_path = inst['img_1_path']
+        img_2_path = inst['img_2_path']
+        img_1_inst = inst['img_1_inst']
+        img_2_inst_list = inst['img_2_inst']
+
+        img1 = Image.open(img_1_path).convert('RGB')
+        img2 = Image.open(img_2_path).convert('RGB')
+
+        w1, h1 = img1.size
+        w2, h2 = img2.size
+
+        bbox1 = img_1_inst['bbox']
+        coords1 = [box2poly(bbox1)]
+        coords2_list = []
+        for img_2_inst in img_2_inst_list:
+            bbox2 = img_2_inst['bbox']
+            coords2 = box2poly(bbox2)
+            coords2_list.append(coords2)
+
+        img1_mask = generate_mask_multi(coords1, w1, h1)
+        img2_mask = generate_mask_multi(coords2_list, w2, h2)
+
+        # img1_mask = generate_mask(coords1, w1, h1)
+        # img2_mask = generate_mask(coords2, w2, h2)
+
+        transformed1 = self.transform(image=np.array(img1), mask=np.array(img1_mask))
+        transformed2 = self.transform(image=np.array(img2), mask=np.array(img2_mask))
+
+        # transformed2 = self.transform(image=img2, mask=img2_mask)
+        # image = transformed['image']
+        # mask = transformed['mask']
+        res_dict = dict(
+            ref_img=transformed1['image'],
+            test_img=transformed2['image'],
+            ref_mask=transformed1['mask'].permute(2, 0, 1),
+            test_mask=transformed2['mask'].permute(2, 0, 1)
+        )
+        return res_dict
+
+
+class MatchDataset_CDLA(MatchDataset):
+    def __getitem__(self, item):
+        inst = self.data[item]
+        img_1_path = inst['img_1_path']
+        img_2_path = inst['img_2_path']
+        img_1_inst = inst['img_1_inst']
+        img_2_inst_list = inst['img_2_inst']
+
+        img1 = Image.open(img_1_path).convert('RGB')
+        img2 = Image.open(img_2_path).convert('RGB')
+
+        w1, h1 = img1.size
+        w2, h2 = img2.size
+
+        bbox1 = img_1_inst['points']
+        coords1 = [points2poly(bbox1)]
+        coords2_list = []
+        for img_2_inst in img_2_inst_list:
+            bbox2 = img_2_inst['points']
+            coords2 = points2poly(bbox2)
+            coords2_list.append(coords2)
+
+        img1_mask = generate_mask_multi(coords1, w1, h1)
+        img2_mask = generate_mask_multi(coords2_list, w2, h2)
+
+        # img1_mask = generate_mask(coords1, w1, h1)
+        # img2_mask = generate_mask(coords2, w2, h2)
+
+        transformed1 = self.transform(image=np.array(img1), mask=np.array(img1_mask))
+        transformed2 = self.transform(image=np.array(img2), mask=np.array(img2_mask))
+
+        # transformed2 = self.transform(image=img2, mask=img2_mask)
+        # image = transformed['image']
+        # mask = transformed['mask']
+        res_dict = dict(
+            ref_img=transformed1['image'],
+            test_img=transformed2['image'],
+            ref_mask=transformed1['mask'].permute(2, 0, 1),
+            test_mask=transformed2['mask'].permute(2, 0, 1)
+        )
+        return res_dict
 
 if __name__ == '__main__':
     dataset = MatchDataset(root='train.json')
